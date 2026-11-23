@@ -1,6 +1,6 @@
 // Browser commands → server actions. Names match OfficeDataSource methods.
 
-import { SERVICE_KEYS, type AgentCli, type AgentConfig, type AgentPatch, type ReviewTool, type WelcomeInput, type NewMcpServer, type Board, type NewAgentInput, type ProjectConfig, type RemoveAgentOptions, type SandboxSettings, type SetupCheckId, type WorkflowPatch } from "../src/data/types";
+import { SERVICE_KEYS, parseAgentCli, type AgentCli, type AgentConfig, type AgentPatch, type ReviewTool, type WelcomeInput, type NewMcpServer, type Board, type NewAgentInput, type ProjectConfig, type RemoveAgentOptions, type SandboxSettings, type SetupCheckId, type WorkflowPatch } from "../src/data/types";
 import { LEAD_NAME, OFFICE_NAME_MAX } from "../src/data/names";
 import { STACK_CATEGORIES, stackSkills, stackTool, type StackChoice, type StackConfig } from "../src/data/stack";
 import { resolveAccess } from "./access";
@@ -88,7 +88,7 @@ export function makeCommands(hub: Hub, sessions: Sessions, planner: Planner, inb
       const used = new Set(team().map((a) => a.color));
       const color = agentPalette.find((c) => !used.has(c)) ?? agentPalette[team().length % agentPalette.length];
       const agent = newAgent(id, name, str(input.role, 40).trim() || "Developer", color, false);
-      agent.cli = input.cli === "codex" ? "codex" : "claude";
+      agent.cli = parseAgentCli(input.cli);
       agent.model = str(input.model, 60).trim();
       agent.mode = input.mode === "local" ? "local" : "sandbox";
       const lead = team().find((a) => a.isLead);
@@ -99,7 +99,7 @@ export function makeCommands(hub: Hub, sessions: Sessions, planner: Planner, inb
       hub.configChanged();
       hub.emit({ type: "agent.updated", agent: structuredClone(status) });
       hub.activity("config", null, `Added ${agent.name} (${agent.role}). Press Start to launch their session.`);
-      if (agent.cli === "codex") void sessions.recheckSetup();
+      if (agent.cli === "codex" || agent.cli === "cursor") void sessions.recheckSetup();
     },
 
     updateAgent: (id, patch) => {
@@ -109,7 +109,7 @@ export function makeCommands(hub: Hub, sessions: Sessions, planner: Planner, inb
       const before = `${agent.cli}/${agent.mode}`;
       for (const k of ["name", "role", "model", "color", "roleMd"] as const) if (typeof p[k] === "string") agent[k] = str(p[k], 8000);
       if (p.mode === "sandbox" || p.mode === "local") agent.mode = p.mode;
-      if ((p.cli === "claude" || p.cli === "codex") && p.cli !== agent.cli) {
+      if ((p.cli === "claude" || p.cli === "codex" || p.cli === "cursor") && p.cli !== agent.cli) {
         agent.cli = p.cli;
         // Model names don't carry over between CLIs.
         if (typeof p.model !== "string") agent.model = "";
@@ -244,7 +244,7 @@ export function makeCommands(hub: Hub, sessions: Sessions, planner: Planner, inb
     completeWelcome: async (raw) => {
       if (!hub.snap.welcome) return;
       const input = (raw ?? {}) as Partial<WelcomeInput>;
-      const cli = (c: unknown): AgentCli => (c === "codex" ? "codex" : "claude");
+      const cli = (c: unknown): AgentCli => parseAgentCli(c);
       const used = new Set<string>();
       const make = (name: string, role: string, agentCli: AgentCli, isLead: boolean): AgentConfig => {
         const clean = str(name, 40).trim() || (isLead ? "Lead" : "Agent");

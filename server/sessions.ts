@@ -8,14 +8,14 @@ import { homedir } from "node:os";
 import { stackSkills } from "../src/data/stack";
 import { hasHqSkills, prepareSkills } from "./skills";
 import { resolve, sep } from "node:path";
-import { HOST_TERMINAL, type AgentCli, type SetupCheckId, type WorkspaceInfo } from "../src/data/types";
+import { CLI_LABEL, HOST_TERMINAL, type AgentCli, type SetupCheckId, type WorkspaceInfo } from "../src/data/types";
 import { adapters, localBinary } from "./adapters";
 import type { Hub } from "./hub";
 import { sessionBackend, type LaunchSpec, type TermHandle } from "./backends";
 import { resolveCommand } from "./backends/pty";
 import { loadEnvFile } from "./backends/tmux";
 import { sandboxList } from "./lib/json";
-import { run } from "./lib/exec";
+import { has, run } from "./lib/exec";
 import { log } from "./lib/log";
 import { projectHome, sessionName } from "./paths";
 import { POLICY_NOT_INITIALIZED, policyVerdict, runSetupChecks } from "./setup";
@@ -95,6 +95,7 @@ export class Sessions {
     const check = (cid: string) => setup.checks.find((c) => c.id === cid)?.status;
     if (agent.mode === "local" && agent.cli === "claude" && check("claude") !== "ok") return fail("Claude Code isn't installed. See the setup checklist.");
     if (agent.mode === "local" && agent.cli === "codex" && check("codex") !== "ok") return fail("Codex isn't installed on this machine. See the setup checklist, or run this agent in a sandbox.");
+    if (agent.mode === "local" && agent.cli === "cursor" && check("cursor") !== "ok") return fail("Cursor CLI isn't installed on this machine. See the setup checklist, or run this agent in a sandbox.");
     if (agent.mode === "sandbox" && agent.cli === "codex" && check("openai-secret") !== "ok")
       return fail("Codex needs an OpenAI key in sbx. Run `sbx secret set openai --oauth` (Setup checklist → Run in terminal).");
 
@@ -117,7 +118,9 @@ export class Sessions {
         const launch = adapter.launch(agent);
         const envFile = this.envFileFor(id);
         // Local mode: the agent gets the env file's variables (tmux only: there's no shell to load them into otherwise).
-        let spec: LaunchSpec = { file: localBinary[agent.cli], args: launch.args, envFile };
+        // The installer command is `agent`; some machines only have `cursor-agent`.
+        const cursorBin = agent.cli === "cursor" && !(await has("agent")) && (await has("cursor-agent")) ? "cursor-agent" : localBinary[agent.cli];
+        let spec: LaunchSpec = { file: cursorBin, args: launch.args, envFile };
         if (agent.mode === "local" && envFile && !this.backend.persistent)
           hub.activity("session", id, `${agent.name}'s env file isn't loaded in Local mode on Windows. Use Sandbox mode for app variables.`);
         if (agent.mode === "sandbox") {
@@ -138,7 +141,7 @@ export class Sessions {
       this.attach(id);
       hub.setSession(id, { state: "running", detail: null, workspace: dir });
       hub.setStatus(id, { state: "idle", note: agent.mode === "sandbox" ? "Sandbox running" : "Running locally" });
-      hub.activity("session", id, `${agent.name} started (${agent.cli === "codex" ? "Codex" : "Claude Code"}, ${agent.mode === "sandbox" ? "Docker Sandbox" : "Local mode"})`);
+      hub.activity("session", id, `${agent.name} started (${CLI_LABEL[agent.cli]}, ${agent.mode === "sandbox" ? "Docker Sandbox" : "Local mode"})`);
       if (agent.mode === "sandbox") {
         setTimeout(() => void this.refreshSandboxSizes(), 4000);
         void this.whenSandboxExists(id).then((ok) => ok && this.onSandboxReady(id));

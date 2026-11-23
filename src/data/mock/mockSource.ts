@@ -235,7 +235,7 @@ export function createMockSource(): OfficeDataSource {
       world.syncEnvironments();
       world.activity("config", null, `Added ${agent.name} (${agent.role}) — new sandbox starting`);
       world.write(id, T.banner(agent.name, agent.role, world.snap.config.project.repo, agent.mode));
-      hostCmd(id, `sbx run claude · allow host.docker.internal:${world.snap.config.project.hqPort}`);
+      hostCmd(id, `sbx run ${agent.cli} · allow host.docker.internal:${world.snap.config.project.hqPort}`);
       syncSbx();
       sim.startWorker(id, 2);
     },

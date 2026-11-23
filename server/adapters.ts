@@ -2,9 +2,9 @@
 // the agent is launched. Everything else (hooks → state, Team MCP, delivery)
 // is shared — Codex and Claude Code send the same hook payloads.
 
-import { agentWrite } from "./lib/agentFs";
+import { agentRead, agentWrite } from "./lib/agentFs";
 import type { AgentCli, AgentConfig, HqConfig } from "../src/data/types";
-import { adoptRoleFile, excludeFromGit, HOOK_SCRIPT, type RoleExtras, hookCommand, hookScriptFor, hqUrl, MCP_CONFIG, roleMd, writeClaudeFiles, writeHookScript } from "./agentFiles";
+import { adoptRoleFile, excludeFromGit, HOOK_SCRIPT, ROLE_FILE, type RoleExtras, hookCommand, hookScriptFor, hqUrl, MCP_CONFIG, roleMd, writeClaudeFiles, writeHookScript } from "./agentFiles";
 import { run } from "./lib/exec";
 
 export interface Launch {
@@ -79,7 +79,91 @@ const codex: CliAdapter = {
   },
 };
 
-export const adapters: Record<AgentCli, CliAdapter> = { claude, codex };
+// ---------------------------------------------------------------- Cursor
+
+const CURSOR_HOOKS = ".cursor/hooks.json";
+const CURSOR_MCP = ".cursor/mcp.json";
+const CURSOR_CLI = ".cursor/cli.json";
+/** Cursor event name → the HQ event the shared hook handler already understands. */
+const CURSOR_EVENTS: [string, string][] = [
+  ["sessionStart", "SessionStart"],
+  ["beforeSubmitPrompt", "UserPromptSubmit"],
+  ["preToolUse", "PreToolUse"],
+  ["postToolUse", "PostToolUse"],
+  ["stop", "Stop"],
+  ["sessionEnd", "SessionEnd"],
+];
+
+type CursorHook = { command: string; timeout?: number; loop_limit?: number | null; matcher?: string };
+type CursorHooksFile = { version?: number; hooks?: Record<string, CursorHook[]> };
+
+function trackedFile(dir: string, rel: string): Promise<boolean> {
+  return run("git", ["ls-files", "--error-unmatch", rel], { cwd: dir }).then((r) => r.ok);
+}
+
+function readJson(dir: string, rel: string): Record<string, unknown> {
+  const raw = agentRead(dir, rel);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Cursor CLI files: role (via the sessionStart hook), hooks, Team MCP, and permission to call it. */
+async function writeCursorFiles(dir: string, agent: AgentConfig, cfg: HqConfig, token: string, extras: RoleExtras) {
+  for (const rel of [CURSOR_HOOKS, CURSOR_MCP]) {
+    if (await trackedFile(dir, rel)) {
+      throw new Error(`This repo commits ${rel}, so HQ can't add its Cursor settings without changing a tracked file. Use Claude Code or Codex for this agent, or remove that file from the repo.`);
+    }
+  }
+  const ownRole = await adoptRoleFile(dir);
+  agentWrite(dir, ROLE_FILE, roleMd(agent, cfg, { ...extras, ownRole }));
+  writeHookScript(dir);
+
+  const url = hqUrl(agent, cfg.project.hqPort);
+  const existing = readJson(dir, CURSOR_HOOKS) as CursorHooksFile;
+  const hooks: Record<string, CursorHook[]> = { ...(existing.hooks ?? {}) };
+  for (const [cursorEvent, hqEvent] of CURSOR_EVENTS) {
+    const current = Array.isArray(hooks[cursorEvent]) ? hooks[cursorEvent] : [];
+    const kept = current.filter((h) => !h.command?.includes("--jsmhq-hook") && !h.command?.includes("# jsmhq-hook"));
+    const ours: CursorHook = { command: hookCommand(url, token, agent.id, hqEvent, null, true), timeout: hqEvent === "Stop" ? 10 : 5 };
+    if (cursorEvent === "stop") ours.loop_limit = null; // HQ may hand over more than Cursor's default of 5 queued messages
+    hooks[cursorEvent] = [...kept, ours];
+  }
+  agentWrite(dir, CURSOR_HOOKS, JSON.stringify({ ...existing, version: 1, hooks }, null, 2) + "\n");
+
+  const mcp = readJson(dir, CURSOR_MCP);
+  const servers = mcp.mcpServers && typeof mcp.mcpServers === "object" && !Array.isArray(mcp.mcpServers) ? (mcp.mcpServers as Record<string, unknown>) : {};
+  servers.hq = {
+    url: `${url}/mcp`,
+    headers: { Authorization: `Bearer ${token}`, "X-HQ-Agent": agent.id },
+  };
+  agentWrite(dir, CURSOR_MCP, JSON.stringify({ ...mcp, mcpServers: servers }, null, 2) + "\n", { mode: 0o600 });
+
+  // Let the team server run without an approval prompt on every call. A committed cli.json is left alone.
+  if (!(await trackedFile(dir, CURSOR_CLI))) {
+    const cli = readJson(dir, CURSOR_CLI);
+    const permissions = cli.permissions && typeof cli.permissions === "object" && !Array.isArray(cli.permissions) ? (cli.permissions as Record<string, unknown>) : {};
+    const allow = new Set([...(Array.isArray(permissions.allow) ? permissions.allow.filter((x): x is string => typeof x === "string") : []), "Mcp(hq:*)"]);
+    agentWrite(dir, CURSOR_CLI, JSON.stringify({ ...cli, permissions: { ...permissions, allow: [...allow] } }, null, 2) + "\n");
+  }
+
+  excludeFromGit(dir, [ROLE_FILE, HOOK_SCRIPT, CURSOR_HOOKS, CURSOR_MCP, CURSOR_CLI]);
+}
+
+const cursor: CliAdapter = {
+  writeFiles: writeCursorFiles,
+  launch(agent) {
+    const model = agent.model.trim() && !/^default$/i.test(agent.model.trim()) ? agent.model.trim() : null;
+    // --approve-mcps lets the Team MCP connect. Sandboxes also start cursor-agent with --yolo.
+    return { sbxAgent: "cursor", args: ["--approve-mcps", ...(model ? ["--model", model] : [])] };
+  },
+};
+
+export const adapters: Record<AgentCli, CliAdapter> = { claude, codex, cursor };
 
 /** The command a Local-mode agent runs on the host. */
-export const localBinary: Record<AgentCli, string> = { claude: "claude", codex: "codex" };
+export const localBinary: Record<AgentCli, string> = { claude: "claude", codex: "codex", cursor: "agent" };

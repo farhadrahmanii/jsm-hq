@@ -66,12 +66,35 @@ if (args[0] === "--print-role") {
   } catch {}
   process.exit(0);
 }
-const [url, token, print] = args;
+const cursor = args.includes("--cursor");
+const [url, token, print] = args.filter((a) => a !== "--cursor");
 let body = "";
 let sent = false;
+// Cursor's hook stdout is its own schema. HQ still speaks Claude's events;
+// this translates the reply so a tool call is allowed and a queued message continues the turn.
+const cursorReply = (text) => {
+  const event = decodeURIComponent((url || "").split("/").pop() || "");
+  if (event === "SessionStart") {
+    let role = "";
+    try {
+      role = readFileSync(new URL("./${ROLE_FILE}", import.meta.url), "utf8");
+    } catch {}
+    process.stdout.write(JSON.stringify({ additional_context: role }));
+  } else if (event === "UserPromptSubmit") {
+    process.stdout.write(JSON.stringify({ continue: true }));
+  } else if (event === "PreToolUse") {
+    process.stdout.write(JSON.stringify({ permission: "allow" }));
+  } else if (event === "Stop" && text) {
+    try {
+      const j = JSON.parse(text);
+      if (j && j.decision === "block" && typeof j.reason === "string" && j.reason) process.stdout.write(JSON.stringify({ followup_message: j.reason }));
+    } catch {}
+  }
+};
 const send = async () => {
   if (sent) return;
   sent = true;
+  let text = "";
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -79,9 +102,11 @@ const send = async () => {
       body: body || "{}",
       signal: AbortSignal.timeout(4000),
     });
+    if (res.ok) text = await res.text();
     // Stop: HQ's reply ({"decision":"block",...}) hands over queued messages.
-    if (print === "--print-reply" && res.ok) process.stdout.write(await res.text());
+    if (!cursor && print === "--print-reply" && text) process.stdout.write(text);
   } catch {}
+  if (cursor) cursorReply(text);
   process.exit(0);
 };
 process.stdin.setEncoding("utf8");
@@ -166,7 +191,9 @@ export function roleMd(agent: AgentConfig, cfg: HqConfig, extras: RoleExtras = {
 type HookEntry = { matcher?: string; hooks: { type: "command"; command: string; timeout?: number }[] };
 type Settings = { hooks?: Record<string, HookEntry[]>; permissions?: { allow?: string[]; [k: string]: unknown }; [k: string]: unknown };
 
-export function hookCommand(url: string, token: string, agentId: string, event: string, script: string | null = null): string {
+export function hookCommand(url: string, token: string, agentId: string, event: string, script: string | null = null, cursor = false): string {
+  // Relative path: inside a sandbox the host path is different, and the agent starts in its folder.
+  if (cursor) return `node ".jsmhq-hook.mjs" ${url}/hook/${agentId}/${event} ${token} --cursor ${MARK_ARG}`;
   if (script) return `node "${script}" ${url}/hook/${agentId}/${event} ${token}${event === "Stop" ? " --print-reply" : ""} ${MARK_ARG}`;
   // Stop prints HQ's reply: {"decision":"block","reason":…} hands over queued messages.
   const out = event === "Stop" ? "2>/dev/null" : ">/dev/null 2>&1";

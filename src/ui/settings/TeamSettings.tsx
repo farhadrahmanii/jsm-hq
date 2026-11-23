@@ -108,7 +108,7 @@ function AgentRow({ agent, expanded, onToggle, onRemove }: { agent: AgentConfig;
               className="field"
               value={agent.model}
               placeholder={`${CLI_LABEL[agent.cli]} default`}
-              list={agent.cli === "codex" ? "codex-models" : "claude-models"}
+              list={agent.cli === "codex" ? "codex-models" : agent.cli === "claude" ? "claude-models" : undefined}
               onCommit={(v) => set({ model: v.trim() })}
             />
           </Field>

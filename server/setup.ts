@@ -180,6 +180,39 @@ async function checkCodex(): Promise<Check> {
   return { ...base, status: "missing", detail: "Not installed. Only needed for Codex agents in Local mode (sandboxes have it).", fix: fix("npm install -g @openai/codex", false, "https://developers.openai.com/codex/cli") };
 }
 
+async function checkCursor(): Promise<Check> {
+  const base = { id: "cursor" as const, label: "Cursor CLI (for Cursor agents in Local mode)", neededFor: "local" as const };
+  const install = os === "win32" ? "irm 'https://cursor.com/install?win32=true' | iex" : "curl -fsSL https://cursor.com/install | bash";
+  for (const bin of ["agent", "cursor-agent"]) {
+    const v = await run(bin, ["--version"], { timeoutMs: 8000 });
+    if (!v.ok) continue;
+    const detail = `${v.stdout}\n${v.stderr}`.trim().split("\n").find((line) => line.trim()) ?? bin;
+    return { ...base, status: "ok", detail, fix: null };
+  }
+  return { ...base, status: "missing", detail: "Not installed. Only needed for Cursor agents in Local mode (sandboxes have it).", fix: fix(install, false, "https://cursor.com/docs/cli/overview") };
+}
+
+async function checkCursorSecret(sbxOk: boolean): Promise<Check> {
+  const base = { id: "cursor-secret" as const, label: "Cursor sign-in for Cursor agents", neededFor: "sandbox" as const };
+  if (!sbxOk) return { ...base, status: "missing", detail: "Waiting for sbx.", fix: null };
+  const r = await run("sbx", ["secret", "ls", "--json"], { timeoutMs: 10_000 });
+  let has = false;
+  try {
+    const parsed = parseCliJson<{ secrets?: { name: string }[] } | { name: string }[]>(r.stdout);
+    const secrets = Array.isArray(parsed) ? parsed : (parsed?.secrets ?? []);
+    has = secrets.some((s) => s.name === "cursor");
+  } catch {
+    has = /\bcursor\b/.test(r.stdout);
+  }
+  if (has) return { ...base, status: "ok", detail: "Stored in Docker's secret store.", fix: null };
+  return {
+    ...base,
+    status: "warning",
+    detail: "No Cursor key stored. The agent asks you to sign in on first start, or store a key to skip that.",
+    fix: fix("sbx secret set cursor", true, "https://docs.docker.com/ai/sandboxes/agents/cursor"),
+  };
+}
+
 async function checkOpenAiSecret(sbxOk: boolean): Promise<Check> {
   const base = { id: "openai-secret" as const, label: "OpenAI sign-in for Codex agents", neededFor: "sandbox" as const };
   if (!sbxOk) return { ...base, status: "missing", detail: "Waiting for sbx.", fix: null };
@@ -205,6 +238,9 @@ export async function runSetupChecks(repo: RepoInfo, team: AgentConfig[] = []): 
   const codexAgents = team.filter((a) => a.cli === "codex");
   if (codexAgents.some((a) => a.mode === "sandbox")) checks.splice(5, 0, await checkOpenAiSecret(sbxOk));
   if (codexAgents.some((a) => a.mode === "local")) checks.push(await checkCodex());
+  const cursorAgents = team.filter((a) => a.cli === "cursor");
+  if (cursorAgents.some((a) => a.mode === "sandbox")) checks.splice(5, 0, await checkCursorSecret(sbxOk));
+  if (cursorAgents.some((a) => a.mode === "local")) checks.push(await checkCursor());
   const ok = (c: SetupCheck) => c.status === "ok";
   return {
     machine: { cpus: cpus().length, memoryGb: Math.round(totalmem() / 1024 ** 3), persistentAgents: usesTmux() },

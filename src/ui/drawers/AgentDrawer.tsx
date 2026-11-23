@@ -231,7 +231,8 @@ function SessionBar({ agent, status }: { agent: AgentConfig; status: AgentStatus
 function NotRunning({ agent, status }: { agent: AgentConfig; status: AgentStatus }) {
   const s = status.session;
   const setup = useOffice((st) => st.snap?.setup);
-  const blocked = agent.mode === "sandbox" ? !setup?.sandboxReady : !setup?.localReady;
+  const cursorReady = setup?.checks.find((c) => c.id === "cursor")?.status === "ok" && setup.checks.find((c) => c.id === "tmux")?.status === "ok";
+  const blocked = agent.mode === "sandbox" ? !setup?.sandboxReady : agent.cli === "cursor" ? !cursorReady : !setup?.localReady;
   return (
     <div className="grid h-full place-items-center bg-navy-2 p-6 text-center text-[#dfe6ff]">
       <div className="max-w-[380px]">
@@ -249,6 +250,11 @@ function NotRunning({ agent, status }: { agent: AgentConfig; status: AgentStatus
             {agent.cli === "codex" && (
               <p className="mb-4 text-[12px] text-[#ffc14d]">
                 First start only: Codex asks you to trust this folder and HQ's hooks. Choose <b>Yes</b>, then <b>Trust all and continue</b>, in the terminal.
+              </p>
+            )}
+            {agent.cli === "cursor" && agent.mode === "sandbox" && (
+              <p className="mb-4 text-[12px] text-[#ffc14d]">
+                First start only: if no Cursor key is stored, sign in when the terminal asks. Or run <b>sbx secret set cursor</b> from the setup checklist.
               </p>
             )}
             <p className="hidden">
